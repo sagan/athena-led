@@ -23,7 +23,7 @@ import (
 	athenaLed "athenaLed/internal"
 )
 
-const Version = "v0.1.4"
+const Version = "v0.1.5-dev"
 
 // syscall.SIGUSR1 & SIGUSR2 only available in Linux. But we are developping in Windows desktop
 // https://man7.org/linux/man-pages/man7/signal.7.html
