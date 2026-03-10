@@ -100,6 +100,7 @@ var (
 	OneShot      bool
 	Seconds      int
 	LightLevel   int
+	Backend      string
 	UrlCacheTime int
 	PidFile      string
 	StatusVar    string
@@ -126,6 +127,7 @@ func main() {
 	flag.BoolVar(&OneShot, "oneShot", false, "Display once and exit")
 	flag.IntVar(&Seconds, "seconds", 5, "Default led switching time (seconds)")
 	flag.IntVar(&LightLevel, "lightLevel", 5, "Led light level, 0-7")
+	flag.StringVar(&Backend, "backend", "auto", `Led backend: auto|tmp1628|gpio. "auto" tries /dev/tmp1628-led first and falls back to gpio`)
 	flag.IntVar(&UrlCacheTime, "urlCacheTime", 60, `The min cache time for "`+OPTION_URL+`" option (seconds). `+
 		`Negative or zero value means no minimal cache time. It respects the url "Cache-Control" response header`)
 	flag.StringVar(&StatusVar, "status", "", "Space separated light-on side led list. Force light on these led. "+
@@ -203,7 +205,7 @@ func main() {
 		}
 	}
 
-	screen, err := athenaLed.Init()
+	screen, err := athenaLed.InitWithBackend(Backend)
 	if err != nil {
 		fmt.Printf("Init error: %v\n", err)
 		return
@@ -223,8 +225,8 @@ func main() {
 	if Location == nil {
 		Location = time.Local
 	}
-	fmt.Printf("tz=%s, status=%08b, seconds=%d, lightLevel=%d, text=%s, url=%s, profiles (%d): %v\n",
-		Location.String(), Status, Seconds, LightLevel, Text, Url, len(OptionsFlags), OptionsFlags)
+	fmt.Printf("backend=%s, tz=%s, status=%08b, seconds=%d, lightLevel=%d, text=%s, url=%s, profiles (%d): %v\n",
+		screen.Backend(), Location.String(), Status, Seconds, LightLevel, Text, Url, len(OptionsFlags), OptionsFlags)
 	Sm = NewStatusManager(Ifname, TestUrl, Profiles)
 
 	// 信号处理设置

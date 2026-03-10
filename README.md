@@ -1,4 +1,7 @@
 - [athena-led](#athena-led)
+  - [安装方法](#安装方法)
+    - [针对官方固件](#针对官方固件)
+    - [针对其他固件](#针对其他固件)
   - [按键控制](#按键控制)
   - [使用示例](#使用示例)
   - [构建](#构建)
@@ -10,8 +13,12 @@
 
 - 增加支持显示的字符数量。现在所有 ASCII 字符都能够正常显示。也支持部分特殊 Unicode 符号，包括：
   - ♥ (heart), ☀ (sunny), ☾ (moon), ☁ (cloudy), ⛆ (little rain), 🌧 (rainy), ⛈ (thunderstorm), ❄ (snow), 🌫 (fog)
-  -  ←, →, ↑, ↓, ↗, ↘, ✓, ✗ 
+  -  ←, →, ↑, ↓, ↗, ↘, ✓, ✗
 - 默认写入 pid 文件 `/var/run/athena-led.pid`。
+- `-backend` 参数，用于选择屏幕驱动后端：
+  - `auto`（默认）：启动时优先使用 `/dev/tmp1628-led`，失败则回退 GPIO。
+  - `tmp1628`：使用 `/dev/tmp1628-led`，设备不存在时启动报错。
+  - `gpio`：使用原来的 GPIO 方案。
 - `-option` flag 增加几种可选显示内容：
   - cpu : CPU 占用率。
   - mem : 内存占用率。
@@ -44,7 +51,60 @@
 - 支持通过 `TZ` 环境变量修改显示的日期/时间的时区。
 - 通过 url 获取的显示内容默认缓存至少 60 秒；支持通过 `Cache-Control` 响应头设置缓存有效期。
 
-使用方法：下载 `athena-led` 可执行文件然后放到 `/usr/sbin/athena-led`
+## 安装方法
+### 针对官方固件
+由于官方固件默认目录空间有限，下载 `athena-led` (arm版本) 可执行文件后，如果`/usr/sbin/`空间不足，也可以放到 `/opt/bin` 等其他合适的目录下（需要自行增加 `PATH` 目录）。
+
+此外，官方固件的 `/etc/init.d/jdcloudbi` 会直接控制 LED 显示屏。因此需要禁用该服务，否则会和本程序冲突。
+
+```sh
+/etc/init.d/jdcloudbi disable
+/etc/init.d/jdcloudbi stop
+```
+
+最后，为了可以让 `athena-led` 开机启动，需要将其作为启动服务，创建 `/etc/init.d/athena_led` 文件并设置可执行权限 `chmod a+x /etc/init.d/athena_led`。参考内容如下：
+
+```sh
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=10
+
+USE_PROCD=1
+NAME=athena_led
+PIDFILE=/var/run/athena-led.pid
+PROG=/path/to/athena-led       # 此处替换成实际路径
+
+start_service() {
+    procd_open_instance
+    procd_set_param command "$PROG" -backend auto -pidFile "$PIDFILE" -seconds 5 -option time # 可根据需要修改启动参数
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+
+stop_service() {
+    service_stop "$PROG"
+}
+
+reload_service() {
+    stop
+    start
+}
+```
+
+其中 `PROG=` 需要先改成 `athena-led` 可执行文件的实际路径，例如 `/usr/sbin/athena-led` 或 `/opt/bin/athena-led`。默认启动参数会持续显示时间；如果你需要自定义显示内容，直接修改脚本里的 `procd_set_param command` 那一行即可。
+
+写入脚本后执行：
+
+```sh
+/etc/init.d/athena_led enable
+/etc/init.d/athena_led start
+```
+
+### 针对其他固件
+下载 `athena-led` (arm64版本)可执行文件然后放到 `/usr/sbin/athena-led`
 (替换原文件)即可。本程序命令行参数与原版保持兼容，所以仍然可以用
 [luci-app-athena-led](https://github.com/NONGFAH/luci-app-athena-led) 控制。但一些新特性需要手动编辑
 `/etc/config/athena_led` 和/或 `/etc/init.d/athena_led` 文件里的参数才能启用，无法通过 luci / Web UI 设置。
