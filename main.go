@@ -9,7 +9,9 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/google/shlex"
 	"github.com/pquerna/cachecontrol"
 
 	athenaLed "athenaLed/internal"
@@ -49,16 +52,19 @@ const (
 	OPTION_DINO       = "dino"
 	OPTION_URL        = "url"
 	OPTION_GET_BY_URL = "getByUrl" // reserved for compatibility
+	OPTION_FILE       = "file"     // display local file contents
+	OPTION_CMD        = "cmd"      // execute a cmd and display output
 
 	HELP_OPTION = `Space separated led options. Possible values: ` + OPTION_DATE + ", " + OPTION_TIME +
 		" (" + OPTION_TIME_BLINK + ")" + ", " + OPTION_TEXT + " (" + OPTION_STRING + ")" + ", " + OPTION_DINO + ", " +
 		OPTION_TEMP + ", " + OPTION_CPU + ", " + OPTION_MEM + ", " + OPTION_UPLOAD + ", " + OPTION_DOWNLOAD + ", " +
-		OPTION_COUNTDOWN + ", " + OPTION_URL + " (" + OPTION_GET_BY_URL + "). " +
+		OPTION_COUNTDOWN + ", " + OPTION_URL + " (" + OPTION_GET_BY_URL + "), " + OPTION_FILE + ", " + OPTION_CMD + ". " +
 		`Use ":value" format suffix to set optional option value (replace space with _), ` +
 		`values of each type option have different meanings: "` + OPTION_DATE + `", "` + OPTION_TIME + `": ` +
 		`Go time format layout, e.g. "` + DEFAULT_DATE_FORMAT + `" or "` + DEFAULT_TIME_FORMAT +
 		`"; "` + OPTION_TEMP + `": temperature type digits string; "` + OPTION_TEXT + `": text contents; "` + OPTION_URL +
-		`": the http(s):// url; "` + OPTION_UPLOAD + `", "` + OPTION_DOWNLOAD + `": network interface name. ` +
+		`": the http(s):// url; "` + OPTION_UPLOAD + `", "` + OPTION_DOWNLOAD + `": network interface name; ` +
+		`"` + OPTION_FILE + `": local file path; "` + OPTION_CMD + `": shell cmdline. ` +
 		`Use "#5" format suffix to set led switching time (duration seconds). ` +
 		`E.g. "string:I_have_a_dream", "url:https://ipinfo.io/json#5". Default: "` + DEFAULT_OPTION +
 		`". Multiple -option flags is allowed, in which case each one is considered as a profile. ` +
@@ -110,6 +116,8 @@ var (
 	PrintStr     string
 	Ifname       string
 	TestUrl      string
+	File         string
+	Cmd          string
 	OptionsFlags stringArray
 	Status       byte
 	Profiles     [][]*Option
@@ -147,6 +155,8 @@ func main() {
 		`If not set, it detects internet outlet interface automatically, fallbacks to "`+DEFAULT_IFNAME+`" if failed`)
 	flag.StringVar(&TestUrl, "testUrl", DEFAULT_TEST_URL, `The url to test internet connectivity. `+
 		`The url should return 204 status. Set to "`+NONE+`" to disable`)
+	flag.StringVar(&File, "file", "/tmp/TZ", `The "`+OPTION_FILE+`" option: default local file path`)
+	flag.StringVar(&Cmd, "cmd", "uptime", `The "`+OPTION_CMD+`" option: default command to execute. Executed by "sh -c"`)
 	flag.StringVar(&PrintStr, "print", "", "Debug: print string character graphes in terminal and exit")
 	flag.Parse()
 
@@ -186,7 +196,12 @@ func main() {
 	}
 	for _, optionsFlag := range OptionsFlags {
 		var options []*Option
-		for _, optionStr := range strings.Split(optionsFlag, " ") {
+		optionStrs, err := shlex.Split(optionsFlag)
+		if err != nil {
+			fmt.Printf("Invalid option %q: %v\n", optionsFlag, err)
+			os.Exit(1)
+		}
+		for _, optionStr := range optionStrs {
 			optionStr = strings.TrimSpace(optionStr)
 			if optionStr == "" {
 				continue
@@ -509,6 +524,29 @@ func mainLoop(ctx context.Context, screen *athenaLed.LedScreen, options []*Optio
 				if !screen.DisplayText(ctx, body, getStatus, time.Duration(option.Duration)*time.Second) {
 					return
 				}
+			case OPTION_FILE:
+				content, err := os.ReadFile(option.Value)
+				if err != nil {
+					fmt.Printf("Error reading file %q: %v\n", option.Value, err)
+					continue
+				}
+				body := strings.TrimSpace(string(content))
+				if !screen.DisplayText(ctx, body, getStatus, time.Duration(option.Duration)*time.Second) {
+					return
+				}
+			case OPTION_CMD:
+				out, err := exec.CommandContext(ctx, "sh", "-c", option.Value).CombinedOutput()
+				if err != nil {
+					fmt.Printf("Error executing cmd %q: %v\n", option.Value, err)
+					if ctx.Err() != nil {
+						return
+					}
+					continue
+				}
+				body := strings.TrimSpace(string(out))
+				if !screen.DisplayText(ctx, body, getStatus, time.Duration(option.Duration)*time.Second) {
+					return
+				}
 			}
 		}
 		if OneShot {
@@ -720,29 +758,17 @@ func getStatus() [4]float64 {
 	return probs
 }
 
+var optionDurationRegex = regexp.MustCompile(`#\d+$`)
+
 // option example: `string:text_content#5`. both value and duration part are optional
 func parseOption(option string) *Option {
-	optionType := option
-	value := ""
 	duration := 0
-	i := strings.IndexByte(option, ':')
-	if i == -1 { // "string" or "string#5"
-		i = strings.LastIndexByte(option, '#')
-		if i != -1 {
-			optionType = option[:i]
-			duration, _ = strconv.Atoi(option[i+1:])
-		}
-	} else { // "string:text" or "string:text#5"
-		optionType = option[:i]
-		rest := option[i+1:]
-		j := strings.LastIndexByte(rest, '#')
-		if j != -1 {
-			value = rest[:j]
-			duration, _ = strconv.Atoi(rest[j+1:])
-		} else {
-			value = rest
-		}
+	if loc := optionDurationRegex.FindStringIndex(option); len(loc) > 0 {
+		durationStr := option[loc[0]+1 : loc[1]]
+		duration, _ = strconv.Atoi(durationStr)
+		option = option[:loc[0]]
 	}
+	optionType, value, _ := strings.Cut(option, ":")
 	if value == "" {
 		switch optionType {
 		case OPTION_TEXT, OPTION_STRING:
@@ -757,9 +783,11 @@ func parseOption(option string) *Option {
 			value = Url
 		case OPTION_UPLOAD, OPTION_DOWNLOAD:
 			value = Ifname
+		case OPTION_FILE:
+			value = File
+		case OPTION_CMD:
+			value = Cmd
 		}
-	} else {
-		value = strings.ReplaceAll(value, "_", " ")
 	}
 	if duration <= 0 {
 		duration = Seconds
