@@ -119,7 +119,7 @@ var (
 	File         string
 	Cmd          string
 	OptionsFlags stringArray
-	Status       byte
+	Status       byte // Bitwise flags. Bit 0-3: force turn on a side led; Bit 4-7: force turn off a side led
 	Profiles     [][]*Option
 	ProfileIndex atomic.Int64 // current using profile index. or -1 to toggle off display
 	Location     *time.Location
@@ -138,8 +138,10 @@ func main() {
 	flag.StringVar(&Backend, "backend", "auto", `Led backend: auto|tmp1628|gpio. "auto" tries /dev/tmp1628-led first and falls back to gpio`)
 	flag.IntVar(&UrlCacheTime, "urlCacheTime", 60, `The min cache time for "`+OPTION_URL+`" option (seconds). `+
 		`Negative or zero value means no minimal cache time. It respects the url "Cache-Control" response header`)
-	flag.StringVar(&StatusVar, "status", "", "Space separated light-on side led list. Force light on these led. "+
-		`All Side led list (two each side, from top to bottom, left to right side): time medal upload download`)
+	flag.StringVar(&StatusVar, "status", "", "Space separated side led list. Force turn on or off side led. "+
+		`The side led list (two each side, from top to bottom, left to right side): time medal upload download. `+
+		`Set to force always turn on a side led; Prepend a "-" prefix to force turn off a side led. `+
+		`E.g. "time -medal" will force turn on "time" and turn off "medal" side led.`)
 	flag.Var(&OptionsFlags, "option", HELP_OPTION)
 	flag.StringVar(&Text, "value", "In God We Trust", `The "`+OPTION_TEXT+`" option: default text contents. `+
 		`Allowed chars: all visible ASCII chars, some special unicode symbols like `+
@@ -181,18 +183,26 @@ func main() {
 	if TestUrl == NONE {
 		TestUrl = ""
 	}
-	for _, item := range strings.Split(StatusVar, " ") {
+	for item := range strings.SplitSeq(StatusVar, " ") {
 		item = strings.TrimSpace(item)
+		bitIndex := 0
+		if strings.HasPrefix(item, "-") {
+			bitIndex += 4
+			item = item[1:]
+		}
 		switch item {
 		case "time":
-			Status |= 1
+			bitIndex += 0
 		case "medal":
-			Status |= 2
+			bitIndex += 1
 		case "upload":
-			Status |= 4
+			bitIndex += 2
 		case "download":
-			Status |= 8
+			bitIndex += 3
+		default:
+			continue
 		}
+		Status |= (1 << bitIndex)
 	}
 	for _, optionsFlag := range OptionsFlags {
 		var options []*Option
@@ -279,28 +289,26 @@ func main() {
 			go Sm.Run(ctx)
 
 			// screen refresh goroutine
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				ticker := time.NewTicker(100 * time.Millisecond)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						status := getStatus()
-						screen.Refresh(&status)
+			if (Status&(1+16)) == 0 || (Status&(2+32)) == 0 || (Status&(4+64)) == 0 || (Status&(8+128)) == 0 {
+				wg.Go(func() {
+					ticker := time.NewTicker(100 * time.Millisecond)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							status := getStatus()
+							screen.Refresh(&status)
+						}
 					}
-				}
-			}()
+				})
+			}
 
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				defer close(loopDone) // 任务结束时关闭通道
 				mainLoop(ctx, screen, Profiles[index])
-			}()
+			})
 		} else {
 			screen.Power(false, 0)
 		}
@@ -724,36 +732,44 @@ func getStatus() [4]float64 {
 	netOk, cpuUsage, _, _, _, upProb, dlProb := Sm.Get(Ifname)
 	probs := [4]float64{0, 0, 0, 0}
 	// Bit 0: time (cpu)
-	if (Status & 1) == 0 {
+	if (Status & 16) == 1 {
+		probs[athenaLed.LedTime] = 0
+	} else if (Status & 1) == 1 {
+		probs[athenaLed.LedTime] = 1.0
+	} else {
 		// optional: 限制最大概率 (永远闪烁)
 		// CPU 10%: 概率 0.05 -> 极少闪烁。
 		// CPU 100%: 概率 0.5 -> 疯狂闪烁 (不会常亮)。
 		// cpuUsage *= 0.5
 		probs[athenaLed.LedTime] = cpuUsage
-	} else {
-		probs[athenaLed.LedTime] = 1.0
 	}
 	// Bit 1: medal (network ok)
-	if (Status & 2) == 0 {
+	if (Status & 32) == 1 {
+		probs[athenaLed.LedTime] = 0
+	} else if (Status & 2) == 1 {
+		probs[athenaLed.LedTime] = 1.0
+	} else {
 		if netOk {
 			probs[athenaLed.LedMedal] = 1.0
 		} else {
 			probs[athenaLed.LedMedal] = 0.0
 		}
-	} else {
-		probs[athenaLed.LedTime] = 1.0
 	}
 	// Bit 2: Upload
-	if (Status & 4) == 0 {
-		probs[athenaLed.LedUpload] = upProb
-	} else {
+	if (Status & 64) == 1 {
+		probs[athenaLed.LedTime] = 0
+	} else if (Status & 4) == 1 {
 		probs[athenaLed.LedUpload] = 1.0
+	} else {
+		probs[athenaLed.LedUpload] = upProb
 	}
 	// Bit 3: Download
-	if (Status & 8) == 0 {
-		probs[athenaLed.LedDownload] = dlProb
-	} else {
+	if (Status & 128) == 1 {
+		probs[athenaLed.LedTime] = 0
+	} else if (Status & 8) == 1 {
 		probs[athenaLed.LedDownload] = 1.0
+	} else {
+		probs[athenaLed.LedDownload] = dlProb
 	}
 	return probs
 }
